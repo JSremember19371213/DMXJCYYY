@@ -1,6 +1,6 @@
 # train.py
 import os
-# Workaround for Windows OpenMP duplicate lib issue (libiomp5md.dll)
+# 解决Windows OpenMP重复库问题 (libiomp5md.dll)
 os.environ.setdefault('KMP_DUPLICATE_LIB_OK', 'True')
 
 import argparse
@@ -19,12 +19,18 @@ from data import download_tiny_shakespeare, CharDataset
 from model import TransformerSeq2Seq, TransformerEncoder, count_parameters
 from utils import save_checkpoint, plot_train_curve, save_vocab, save_json
 
-# non-interactive matplotlib
+# 非交互式matplotlib后端
 import matplotlib
 matplotlib.use('Agg')
 
 
 def set_seed(seed):
+    """
+    设置随机种子以确保实验可重复性
+    
+    Args:
+        seed (int): 随机种子值
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -33,6 +39,16 @@ def set_seed(seed):
 
 
 def get_scheduler(optimizer, warmup_steps=1000):
+    """
+    获取学习率调度器
+    
+    Args:
+        optimizer: 优化器
+        warmup_steps (int): 预热步数
+        
+    Returns:
+        LambdaLR: 学习率调度器
+    """
     def lr_lambda(step):
         if step == 0:
             return 1.0
@@ -41,9 +57,20 @@ def get_scheduler(optimizer, warmup_steps=1000):
 
 
 def create_masks_for_seq2seq(src, tgt, pad_idx=None):
-    # For char-level tiny dataset, assume no padding; if padding used, modify accordingly.
+    """
+    为序列到序列任务创建掩码
+    
+    Args:
+        src (Tensor): 源序列
+        tgt (Tensor): 目标序列
+        pad_idx (int, optional): 填充索引
+        
+    Returns:
+        tuple: 源掩码、目标掩码和记忆掩码
+    """
+    # 对于字符级tiny数据集，假设没有填充；如果使用填充，需要相应修改
     device = src.device
-    # src_mask not used here (no padding)
+    # 这里不使用src_mask（无填充）
     src_mask = None
     tgt_len = tgt.size(1)
     tgt_mask = torch.tril(torch.ones((tgt_len, tgt_len), device=device)).unsqueeze(0).unsqueeze(0)  # (1,1,tgt,tgt)
@@ -52,30 +79,36 @@ def create_masks_for_seq2seq(src, tgt, pad_idx=None):
 
 
 def train(args):
+    """
+    训练函数
+    
+    Args:
+        args: 命令行参数
+    """
     set_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # dataset download
+    # 下载数据集
     data_path = download_tiny_shakespeare(args.data)
     ds = CharDataset(data_path, seq_len=args.seq_len, mode=('lm' if args.task == 'lm' else 'seq2seq'))
     vocab_size = ds.vocab_size
     dataloader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ds.collate_fn, drop_last=True)
 
-    # Model selection: for seq2seq we use TransformerSeq2Seq with same vocab for src/tgt by default.
+    # 模型选择: 对于seq2seq任务，我们默认使用源和目标词汇表相同的TransformerSeq2Seq
     if args.task == 'seq2seq':
         model = TransformerSeq2Seq(src_vocab=vocab_size, tgt_vocab=vocab_size,
                                    d_model=args.d_model, num_layers=args.layers, num_heads=args.heads,
                                    d_ff=args.d_ff, dropout=args.dropout, max_len=args.max_len,
                                    use_pos=args.use_pos_encoding, use_relative=args.relative_pos,
                                    max_rel_pos=args.max_rel, use_residual=(not args.no_residual))
-    else:  # 'lm'
+    else:  # 'lm' 语言模型任务
         model = TransformerEncoder(vocab_size=vocab_size, d_model=args.d_model, num_layers=args.layers,
                                    num_heads=args.heads, d_ff=args.d_ff, dropout=args.dropout, max_len=args.max_len,
                                    use_pos=args.use_pos_encoding, use_relative=args.relative_pos, max_rel_pos=args.max_rel,
                                    use_residual=(not args.no_residual))
 
     model.to(device)
-    print('Params:', count_parameters(model))
+    print('参数数量:', count_parameters(model))
 
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = get_scheduler(optimizer, warmup_steps=args.warmup)
@@ -85,7 +118,7 @@ def train(args):
     model_dir = Path(args.save)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    # save training config for reproducibility
+    # 保存训练配置以确保实验可重现
     config_path = model_dir / 'train_config.json'
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(vars(args), f, indent=2, ensure_ascii=False)
@@ -101,11 +134,11 @@ def train(args):
             optimizer.zero_grad()
 
             if args.task == 'seq2seq':
-                # For decoder input, provide <bos> or shifted target; here we use y_input = [<pad?>, y[:, :-1]]
-                # Simpler: shift right by one and use last token as target. For char-level, treat y as target and y_input as previous tokens.
+                # 对于解码器输入，提供<bos>或偏移目标；这里我们使用y_input = [<pad?>, y[:, :-1]]
+                # 更简单的方法：向右偏移一位，使用最后一个token作为目标。对于字符级，将y作为目标，y_input作为前一个token。
                 y_input = torch.zeros_like(y)
                 y_input[:, 1:] = y[:, :-1]
-                # y_input[:,0] stays 0 (could be special BOS if using special token)
+                # y_input[:,0] 保持为0（可以是特殊BOS，如果使用特殊token）
                 src_mask, tgt_mask, memory_mask = create_masks_for_seq2seq(x, y_input)
                 logits, self_attns, enc_attns = model(x, y_input, src_mask, tgt_mask, memory_mask)
                 # logits: (batch, seq, vocab)
@@ -124,25 +157,25 @@ def train(args):
             global_step += 1
 
             if (i % args.log_interval) == 0:
-                print(f'Epoch {epoch} Step {i} Loss {loss.item():.4f}')
+                print(f'轮次 {epoch} 步骤 {i} 损失 {loss.item():.4f}')
 
         end = time.time()
         avg_loss = epoch_loss / max(1, len(dataloader))
-        print(f'Epoch {epoch} finished in {end-start:.1f}s average loss {avg_loss:.4f}')
-        # save checkpoint each epoch
+        print(f'轮次 {epoch} 在 {end-start:.1f}秒 内完成，平均损失 {avg_loss:.4f}')
+        # 每个epoch保存检查点
         ckpt = model_dir / f'model_epoch{epoch}.pt'
         save_checkpoint(model, optimizer, scheduler, epoch, ckpt, extra={'vocab': ds.chars})
 
-    # plot
+    # 绘制训练曲线
     plot_train_curve(train_losses, model_dir / 'train_loss.png')
-    # save vocab
+    # 保存词汇表
     save_vocab(ds.chars, model_dir / 'vocab.json')
-    print('Training finished. Artifacts in', model_dir)
+    print('训练完成。结果保存在', model_dir)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, choices=['lm', 'seq2seq'], default='seq2seq', help='Task type')
+    parser.add_argument('--task', type=str, choices=['lm', 'seq2seq'], default='seq2seq', help='任务类型')
     parser.add_argument('--data', type=str, default='data/tiny_shakespeare.txt')
     parser.add_argument('--seq_len', type=int, default=128)
     parser.add_argument('--batch_size', type=int, default=32)
@@ -160,9 +193,9 @@ if __name__ == '__main__':
     parser.add_argument('--log_interval', type=int, default=100)
     parser.add_argument('--save', type=str, default='results')
     parser.add_argument('--max_len', type=int, default=5000)
-    parser.add_argument('--use_pos_encoding', action='store_true', help='Use sinusoidal positional encoding')
-    parser.add_argument('--relative_pos', action='store_true', help='Use relative positional bias')
-    parser.add_argument('--max_rel', type=int, default=128, help='Max relative position (for relative bias)')
-    parser.add_argument('--no_residual', action='store_true', help='Disable residual connections for ablation')
+    parser.add_argument('--use_pos_encoding', action='store_true', help='使用正弦位置编码')
+    parser.add_argument('--relative_pos', action='store_true', help='使用相对位置偏置')
+    parser.add_argument('--max_rel', type=int, default=128, help='最大相对位置（用于相对偏置）')
+    parser.add_argument('--no_residual', action='store_true', help='禁用残差连接以进行消融实验')
     args = parser.parse_args()
     train(args)
